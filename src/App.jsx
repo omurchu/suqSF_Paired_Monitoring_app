@@ -1,6 +1,24 @@
 import { useEffect, useMemo, useState } from 'react'
 import Papa from 'papaparse'
 import { ComposedChart, ResponsiveContainer, XAxis, YAxis, CartesianGrid, Tooltip, Legend, Bar, Line, Scatter, ReferenceLine } from 'recharts'
+import {
+  ECOLI_GMV30_SERIES_NAME,
+  FECAL_GMV30_SERIES_NAME,
+  ECOLI_OBSERVATIONS_SERIES_NAME,
+  FECAL_OBSERVATIONS_SERIES_NAME,
+  FECAL_THRESHOLD_SERIES_NAME,
+  LEGEND_PAYLOAD,
+  FECAL_THRESHOLD_SHAPE,
+  FECAL_GMV30_STYLE,
+  ECOLI_GMV_LIMIT_VALUE,
+  ECOLI_GMV_LIMIT_NAME,
+  ECOLI_GMV_LIMIT_STYLE,
+  ECOLI_P90_LIMIT_VALUE,
+  FECAL_P90_LIMIT_VALUE,
+  FECAL_GMV_LIMIT_VALUE,
+  FECAL_GMV_LIMIT_NAME,
+  FECAL_GMV_LIMIT_STYLE,
+} from './chartSeries'
 
 // const DATA_PATH = '/data'
 const DATA_PATH = import.meta.env.BASE_URL + 'data' // Adjusted for Vite's base path handling
@@ -243,14 +261,6 @@ const App = () => {
     () => selectedStationDetails?.WADOHStation, [selectedStationDetails],
   )
 
-  const legendPayload = useMemo(() => [
-    { value: 'Precipitation', type: 'square', color: '#1f77b4' },
-    { value: 'E. coli GMV30', type: 'line', color: '#2ca02c' },
-    { value: 'Fecal Coliform GMV30', type: 'line', color: '#d62728' },
-    { value: 'E. coli observations', type: 'square', color: '#2ca02c' },
-    { value: 'Fecal Coliform observations (points)', type: 'circle', color: '#d62728' },
-    { value: 'Fecal Coliform 90% > threshold', type: 'square', color: '#d62728' },
-  ], [])
 
   const generate = () => {
     if (!selectedStation) return
@@ -270,8 +280,8 @@ const App = () => {
       ? collapsedFecal.filter((row) => row.Date <= gmvEnd)
       : collapsedFecal.filter((row) => row.Date >= gmvStart && row.Date <= gmvEnd)
 
-    const ecoliStats = addRollingStats(ecoliForStats, 100)
-    const fecalStats = addRollingStats(fecalForStats, 100)
+    const ecoliStats = addRollingStats(ecoliForStats, ECOLI_P90_LIMIT_VALUE)
+    const fecalStats = addRollingStats(fecalForStats, FECAL_P90_LIMIT_VALUE)
 
     const filteredPrecip = precip.filter((row) => {
       const year = row.Date.getFullYear()
@@ -287,11 +297,16 @@ const App = () => {
       .map((row) => ({ ...row, date: row.Date.getTime() }))
       .filter((row) => row.date >= rangeStart.getTime() && row.date <= rangeEnd.getTime())
     const chartSeries = createChartSeries(filteredPrecip, ecoliStats, fecalStats, rangeStart, rangeEnd)
+    const observedValues = [...sampleEcoliStats, ...sampleFecalStats]
+      .map((row) => row.Value)
+      .filter((value) => Number.isFinite(value) && value > 0)
+    const maxObservedValue = observedValues.length > 0 ? Math.max(...observedValues) : 1
 
     setChartData({
       chartSeries,
       ecoliStats: sampleEcoliStats,
       fecalStats: sampleFecalStats,
+      leftAxisMax: Math.max(1, maxObservedValue * 1.05),
       hasFecalData: Boolean(stationFecal.length),
     })
   }
@@ -371,10 +386,10 @@ const App = () => {
 
       {chartData ? (
         <section className="chart-panel">
-          <h2>Chart for {selectedStationDetails?.DisplayName}</h2>
+          <h2>Paired monitoring sites: {selectedStationDetails?.DisplayName}</h2>
           <div className="chart-container">
             <ResponsiveContainer width="100%" height={540}>
-              <ComposedChart data={chartData.chartSeries}>
+              <ComposedChart data={chartData.chartSeries} margin={{ top: 5, right: 18, bottom: 5, left: 23 }}>
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis
                   dataKey="date"
@@ -391,23 +406,35 @@ const App = () => {
                 <YAxis
                   yAxisId="left"
                   scale="log"
-                  domain={[1, 'dataMax']}
+                  domain={[1, chartData.leftAxisMax]}
                   allowDataOverflow={true}
                   tickFormatter={(value) => (value >= 1 ? value.toString() : '')}
+                  label={{
+                    value: 'E. coli (cfu/100mL) / Fecal Coliform (colonies/100mL)',
+                    angle: -90,
+                    position: 'insideLeft',
+                    offset: -9,
+                    style: { textAnchor: 'middle', fill: '#1a1a1a' },
+                  }}
                 />
                 <YAxis
                   yAxisId="right"
                   orientation="right"
                   domain={['dataMax', 0]}
                   tickFormatter={(value) => value.toFixed(2)}
+                  label={{
+                    value: 'Precipitation (inches)',
+                    angle: 90,
+                    position: 'insideRight',
+                    offset: -13,
+                    style: { textAnchor: 'middle', fill: '#1a1a1a' },
+                  }}
                 />
                 <Tooltip
                   labelFormatter={(value) => formatDate(value)}
                   formatter={(value, name) => [value, name]}
                 />
-                <Legend payload={legendPayload} />
-
-                {/* E. coli threshold reference line removed per request */}
+                <Legend payload={LEGEND_PAYLOAD} />
 
                 <Bar dataKey="Precip_in" barSize={2} barCategoryGap="2%" fill="#1f77b4" opacity={0.25} yAxisId="right" />
                 <Line
@@ -427,12 +454,28 @@ const App = () => {
                   type="monotone"
                   data={chartData.fecalStats.filter((row) => row.GMV30 != null)}
                   dataKey="GMV30"
-                  stroke="#d62728"
-                  strokeWidth={2}
-                  strokeDasharray="4 4"
-                  name="Fecal Coliform GMV30"
+                  stroke={FECAL_GMV30_STYLE.stroke}
+                  strokeWidth={FECAL_GMV30_STYLE.strokeWidth}
+                  strokeDasharray={FECAL_GMV30_STYLE.strokeDasharray}
+                  name={FECAL_GMV30_SERIES_NAME}
                   dot={false}
                   connectNulls={true}
+                />
+                <ReferenceLine
+                  y={ECOLI_GMV_LIMIT_VALUE}
+                  yAxisId="left"
+                  stroke={ECOLI_GMV_LIMIT_STYLE.stroke}
+                  strokeDasharray={ECOLI_GMV_LIMIT_STYLE.strokeDasharray}
+                  strokeWidth={ECOLI_GMV_LIMIT_STYLE.strokeWidth}
+                  name={ECOLI_GMV_LIMIT_NAME}
+                />
+                <ReferenceLine
+                  y={FECAL_GMV_LIMIT_VALUE}
+                  yAxisId="left"
+                  stroke={FECAL_GMV_LIMIT_STYLE.stroke}
+                  strokeDasharray={FECAL_GMV_LIMIT_STYLE.strokeDasharray}
+                  strokeWidth={FECAL_GMV_LIMIT_STYLE.strokeWidth}
+                  name={FECAL_GMV_LIMIT_NAME}
                 />
                 <Scatter
                   yAxisId="left"
@@ -446,7 +489,7 @@ const App = () => {
                   data={chartData.fecalStats.filter((row) => row.Value != null)}
                   dataKey="Value"
                   fill="#d62728"
-                  name="Fecal Coliform observations (points)"
+                  name={FECAL_OBSERVATIONS_SERIES_NAME}
                 />
                 {/* E. coli above threshold hidden for QA */}
                 {false && <Scatter
@@ -482,11 +525,8 @@ const App = () => {
                   stroke="#d62728"
                   strokeWidth={2}
                   isAnimationActive={false}
-                  shape={(props) => {
-                    const { cx, cy } = props
-                    return <rect x={cx - 6} y={cy - 6} width={12} height={12} stroke="#d62728" fill="none" strokeWidth={2} />
-                  }}
-                  name="Fecal Coliform 90% > threshold"
+                  shape={FECAL_THRESHOLD_SHAPE}
+                  name={FECAL_THRESHOLD_SERIES_NAME}
                 />
                 {/* Fecal Coliform below threshold hidden for QA */}
                 {false && <Scatter

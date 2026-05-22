@@ -1,6 +1,6 @@
 Catchment,DisplayName,KPHDStation,EIMLocationID,WADOHStation,GAName
-Barker Creek,Barker Creek(KCHD-BK01)-Dyes Inlet (WADOH stn463),BK01,KCHD-BK01,463,Dyes Inlet
-Chico Creek,Chico Creek(KCHD-CH01)-Dyes Inlet (WADOH stn472),CH01,KCHD-CH01,472,Dyes Inlet
-Clear Creek,Clear Creek(KCHD-CC01)-Dyes Inlet (WADOH stn466),CC01,KCHD-CC01,466,Dyes Inlet
-Mosher Creek,Mosher Creek(KCHD-MS01)-Dyes Inlet (WADOH stn656),MS01,KCHD-MS01,656,Dyes Inlet
-Strawberry Creek,Strawberry Creek(KCHD-SR01)-Dyes Inlet (WADOH stn),SR01,KCHD-SR01,,
+Barker Creek,Barker Creek(KCHD-BK01) - Dyes Inlet(WADOH stn463),BK01,KCHD-BK01,463,Dyes Inlet
+Chico Creek,Chico Creek(KCHD-CH01) - Dyes Inlet(WADOH stn472),CH01,KCHD-CH01,472,Dyes Inlet
+Clear Creek,Clear Creek(KCHD-CC01) - Dyes Inlet(WADOH stn466),CC01,KCHD-CC01,466,Dyes Inlet
+Mosher Creek,Mosher Creek(KCHD-MS01) - Dyes Inlet(WADOH stn656),MS01,KCHD-MS01,656,Dyes Inlet
+Strawberry Creek,Strawberry Creek(KCHD-SR01) - Dyes Inlet(WADOH no matched stn),SR01,KCHD-SR01,,
