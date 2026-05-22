@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from 'react'
 import Papa from 'papaparse'
 import { ComposedChart, ResponsiveContainer, XAxis, YAxis, CartesianGrid, Tooltip, Legend, Bar, Line, Scatter, ReferenceLine } from 'recharts'
 
-const DATA_PATH = '/data'
+// const DATA_PATH = '/data'
+const DATA_PATH = import.meta.env.BASE_URL + 'data' // Adjusted for Vite's base path handling
 const CSV_FILES = {
   stations: `${DATA_PATH}/station_lookup.csv`,
   precip: `${DATA_PATH}/precip_filtered.csv`,
