@@ -4,3 +4,4 @@ dist/
 .env
 *.timestamp-*
 .vscode/
+public/data/*_old.csv

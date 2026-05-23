@@ -6,7 +6,11 @@ import {
   FECAL_GMV30_SERIES_NAME,
   ECOLI_OBSERVATIONS_SERIES_NAME,
   FECAL_OBSERVATIONS_SERIES_NAME,
+  ECOLI_THRESHOLD_SERIES_NAME,
+  ECOLI_THRESHOLD_SHAPE,
+  ECOLI_P90_LIMIT_COLOR,
   FECAL_THRESHOLD_SERIES_NAME,
+  FECAL_P90_LIMIT_COLOR,
   LEGEND_PAYLOAD,
   FECAL_THRESHOLD_SHAPE,
   FECAL_GMV30_STYLE,
@@ -58,34 +62,63 @@ const geometricMean = (values) => {
   return Math.exp(sum / values.length)
 }
 
+const standardDeviation = (values) => {
+  if (values.length < 2) return NaN
+  const mean = values.reduce((acc, value) => acc + value, 0) / values.length
+  const variance = values.reduce((acc, value) => acc + ((value - mean) ** 2), 0) / (values.length - 1)
+  return Math.sqrt(variance)
+}
+
+const lognormalPercentile = (values, zScore) => {
+  if (values.length < 2 || values.some((value) => value <= 0)) return NaN
+  const logValues = values.map((value) => Math.log(value))
+  const logMean = logValues.reduce((acc, value) => acc + value, 0) / logValues.length
+  const logSd = standardDeviation(logValues)
+  return Math.exp(logMean + (zScore * logSd))
+}
+
 const collapseDaily = (rows) => {
   const group = new Map()
   rows.forEach((row) => {
     const day = row.Date.toISOString().slice(0, 10)
     const existing = group.get(day)
     if (!existing) {
-      group.set(day, { Date: row.Date, sum: row.Value, count: 1 })
+      group.set(day, {
+        ...row,
+        Date: row.Date,
+        sum: row.Value,
+        count: 1,
+      })
     } else {
       existing.sum += row.Value
       existing.count += 1
     }
   })
   return Array.from(group.values())
-    .map((item) => ({ Date: item.Date, Value: item.sum / item.count }))
+    .map((item) => ({
+      ...item,
+      Value: item.sum / item.count,
+      Count: item.count,
+      sum: undefined,
+      count: undefined,
+    }))
     .sort((a, b) => a.Date - b.Date)
 }
 
-const addRollingStats = (rows, threshold, window = 30) => {
-  const out = rows.map((row) => ({ ...row, GMV30: NaN, P90_30: NaN, Exceeds_RegThreshold: false, Crosses_Above_Threshold: false, Crosses_Below_Threshold: false }))
+const addRollingStats = (rows, threshold, window = 30, exceedanceMethod = 'lognormal') => {
+  const out = rows.map((row) => ({ ...row, GMV30: NaN, P90_30: NaN, P90_LN_30: NaN, Exceeds_RegThreshold: false, Crosses_Above_Threshold: false, Crosses_Below_Threshold: false }))
   for (let index = 0; index < out.length; index += 1) {
     const windowRows = out.slice(Math.max(0, index - window + 1), index + 1)
     if (windowRows.length === window) {
       const values = windowRows.map((row) => row.Value)
       const gmv = geometricMean(values)
       const p90 = quantile(values, 0.9)
+      const p90Ln = lognormalPercentile(values, 1.2815515655446004)
       out[index].GMV30 = Number.isNaN(gmv) ? null : gmv
       out[index].P90_30 = Number.isNaN(p90) ? null : p90
-      out[index].Exceeds_RegThreshold = p90 > threshold
+      out[index].P90_LN_30 = Number.isNaN(p90Ln) ? null : p90Ln
+      const exceedanceValue = exceedanceMethod === 'raw' ? p90 : p90Ln
+      out[index].Exceeds_RegThreshold = exceedanceValue > threshold
     }
     if (index > 0 && out[index].P90_30 != null && out[index - 1].P90_30 != null) {
       out[index].Crosses_Above_Threshold = out[index].Exceeds_RegThreshold && !out[index - 1].Exceeds_RegThreshold
@@ -94,6 +127,25 @@ const addRollingStats = (rows, threshold, window = 30) => {
   }
   return out
 }
+
+const formatNumber = (value, digits = 2) => {
+  const numericValue = Number(value)
+  return Number.isFinite(numericValue) ? numericValue.toFixed(digits) : ''
+}
+
+const formatTooltipValue = (value) => (typeof value === 'number' ? value.toFixed(2) : value)
+
+const KPH_D_ECOLI_OBSERVATION_COLOR = '#2ca02c'
+const KPH_D_FECAL_OBSERVATION_COLOR = '#98df8a'
+
+const KphdObservationShape = ({ cx, cy, payload }) => (
+  <circle
+    cx={cx}
+    cy={cy}
+    r={4}
+    fill={payload?.Constituent === 'Fecal Coliform' ? KPH_D_FECAL_OBSERVATION_COLOR : KPH_D_ECOLI_OBSERVATION_COLOR}
+  />
+)
 
 const toTimeKey = (date) => date.toISOString().slice(0, 10)
 
@@ -163,6 +215,7 @@ const App = () => {
   const [startYear, setStartYear] = useState(2021)
   const [endYear, setEndYear] = useState(2025)
   const [useAllDataForGMVs, setUseAllDataForGMVs] = useState(false)
+  const [percentileExceedanceMethod, setPercentileExceedanceMethod] = useState('lognormal')
   const [chartData, setChartData] = useState(null)
   const [selectedStationDetails, setSelectedStationDetails] = useState(null)
 
@@ -201,6 +254,8 @@ const App = () => {
           ecoliCsv
             .map((row) => ({
               Catchment: row.Catchment,
+              Constituent: row.Constituent,
+              Units: row.Units,
               Date: parseDate(row.Date),
               Value: Number(row.Value),
             }))
@@ -211,6 +266,8 @@ const App = () => {
           fecalCsv
             .map((row) => ({
               Catchment: row.Catchment,
+              Constituent: row.Constituent,
+              Units: row.Units,
               Date: parseDate(row.Date),
               Value: Number(row.Value),
             }))
@@ -280,8 +337,8 @@ const App = () => {
       ? collapsedFecal.filter((row) => row.Date <= gmvEnd)
       : collapsedFecal.filter((row) => row.Date >= gmvStart && row.Date <= gmvEnd)
 
-    const ecoliStats = addRollingStats(ecoliForStats, ECOLI_P90_LIMIT_VALUE)
-    const fecalStats = addRollingStats(fecalForStats, FECAL_P90_LIMIT_VALUE)
+    const ecoliStats = addRollingStats(ecoliForStats, ECOLI_P90_LIMIT_VALUE, 30, percentileExceedanceMethod)
+    const fecalStats = addRollingStats(fecalForStats, FECAL_P90_LIMIT_VALUE, 30, percentileExceedanceMethod)
 
     const filteredPrecip = precip.filter((row) => {
       const year = row.Date.getFullYear()
@@ -296,6 +353,38 @@ const App = () => {
     const sampleFecalStats = fecalStats
       .map((row) => ({ ...row, date: row.Date.getTime() }))
       .filter((row) => row.date >= rangeStart.getTime() && row.date <= rangeEnd.getTime())
+    const kphdTableRows = addRollingStats(
+      useAllDataForGMVs
+        ? collapsedEcoli
+          .filter((row) => row.Date <= rangeEnd)
+          .sort((a, b) => a.Date - b.Date)
+        : collapsedEcoli
+          .filter((row) => row.Date >= rangeStart && row.Date <= rangeEnd)
+          .sort((a, b) => a.Date - b.Date),
+      ECOLI_P90_LIMIT_VALUE,
+      30,
+      percentileExceedanceMethod,
+    )
+      .map((row) => ({ ...row, date: row.Date.getTime() }))
+      .filter((row) => row.Date >= rangeStart && row.Date <= rangeEnd)
+      .sort((a, b) => b.Date - a.Date)
+    const waDohTableRows = addRollingStats(
+      useAllDataForGMVs
+        ? collapsedFecal
+          .filter((row) => row.Date <= rangeEnd)
+          .sort((a, b) => a.Date - b.Date)
+        : collapsedFecal
+          .filter((row) => row.Date >= rangeStart && row.Date <= rangeEnd)
+          .sort((a, b) => a.Date - b.Date),
+      FECAL_P90_LIMIT_VALUE,
+      30,
+      percentileExceedanceMethod,
+    )
+      .map((row) => ({ ...row, date: row.Date.getTime() }))
+      .filter((row) => row.Date >= rangeStart && row.Date <= rangeEnd)
+      .sort((a, b) => b.Date - a.Date)
+    const ecoliThresholdExceedances = kphdTableRows.filter((row) => row.Exceeds_RegThreshold)
+    const fecalThresholdExceedances = waDohTableRows.filter((row) => row.Exceeds_RegThreshold)
     const chartSeries = createChartSeries(filteredPrecip, ecoliStats, fecalStats, rangeStart, rangeEnd)
     const observedValues = [...sampleEcoliStats, ...sampleFecalStats]
       .map((row) => row.Value)
@@ -306,8 +395,25 @@ const App = () => {
       chartSeries,
       ecoliStats: sampleEcoliStats,
       fecalStats: sampleFecalStats,
+      ecoliGmvSeries: sampleEcoliStats
+        .filter((row) => row.GMV30 != null)
+        .map((row) => ({ ...row, EcoliGMV: row.GMV30 })),
+      fecalGmvSeries: sampleFecalStats
+        .filter((row) => row.GMV30 != null)
+        .map((row) => ({ ...row, FecalGMV: row.GMV30 })),
+      ecoliObservationSeries: sampleEcoliStats
+        .filter((row) => row.Value != null)
+        .map((row) => ({ ...row, EcoliValue: row.Value })),
+      fecalObservationSeries: sampleFecalStats
+        .filter((row) => row.Value != null)
+        .map((row) => ({ ...row, FecalValue: row.Value })),
+      ecoliThresholdExceedances,
+      fecalThresholdExceedances,
+      kphdTableRows,
+      waDohTableRows,
       leftAxisMax: Math.max(1, maxObservedValue * 1.05),
       hasFecalData: Boolean(stationFecal.length),
+      showKphdFecalNote: startYear < 2020,
     })
   }
 
@@ -372,6 +478,32 @@ const App = () => {
           </p>
         </div>
 
+        <div className="control-row">
+          <span className="control-label">For 90% exceedance checks, use</span>
+          <div className="radio-group" role="radiogroup" aria-label="90% exceedance check method">
+            <label>
+              <input
+                type="radio"
+                name="percentile-exceedance-method"
+                value="lognormal"
+                checked={percentileExceedanceMethod === 'lognormal'}
+                onChange={(event) => setPercentileExceedanceMethod(event.target.value)}
+              />
+              Estimated 90%ile based on a lognormal distribution
+            </label>
+            <label>
+              <input
+                type="radio"
+                name="percentile-exceedance-method"
+                value="raw"
+                checked={percentileExceedanceMethod === 'raw'}
+                onChange={(event) => setPercentileExceedanceMethod(event.target.value)}
+              />
+              Raw rolling 90%ile from observation values
+            </label>
+          </div>
+        </div>
+
         <button onClick={generate} className="generate-button">
           Generate chart
         </button>
@@ -432,65 +564,101 @@ const App = () => {
                 />
                 <Tooltip
                   labelFormatter={(value) => formatDate(value)}
-                  formatter={(value, name) => [value, name]}
+                  formatter={(value, name) => [formatTooltipValue(value), name]}
                 />
-                <Legend payload={LEGEND_PAYLOAD} />
+                <Legend
+                  payload={chartData.hasFecalData
+                    ? LEGEND_PAYLOAD.filter((item) => (
+                      (item.value !== ECOLI_THRESHOLD_SERIES_NAME || chartData.ecoliThresholdExceedances.length > 0)
+                      && (item.value !== FECAL_THRESHOLD_SERIES_NAME || chartData.fecalThresholdExceedances.length > 0)
+                    ))
+                    : LEGEND_PAYLOAD.filter((item) => (
+                      (item.value !== ECOLI_THRESHOLD_SERIES_NAME || chartData.ecoliThresholdExceedances.length > 0)
+                      && ![
+                      FECAL_GMV30_SERIES_NAME,
+                      FECAL_GMV_LIMIT_NAME,
+                      FECAL_OBSERVATIONS_SERIES_NAME,
+                      FECAL_THRESHOLD_SERIES_NAME,
+                    ].includes(item.value)
+                    ))}
+                />
 
                 <Bar dataKey="Precip_in" barSize={2} barCategoryGap="2%" fill="#1f77b4" opacity={0.25} yAxisId="right" />
                 <Line
                   yAxisId="left"
-                  type="monotone"
-                  data={chartData.ecoliStats.filter((row) => row.GMV30 != null)}
-                  dataKey="GMV30"
+                  type="linear"
+                  data={chartData.ecoliGmvSeries}
+                  dataKey="EcoliGMV"
                   stroke="#2ca02c"
                   strokeWidth={3}
-                  name="E. coli GMV30"
+                  name={ECOLI_GMV30_SERIES_NAME}
                   dot={false}
                   connectNulls={true}
                 />
-                {/* Fecal Coliform GMV30 is hidden for QA */}
-                <Line
-                  yAxisId="left"
-                  type="monotone"
-                  data={chartData.fecalStats.filter((row) => row.GMV30 != null)}
-                  dataKey="GMV30"
-                  stroke={FECAL_GMV30_STYLE.stroke}
-                  strokeWidth={FECAL_GMV30_STYLE.strokeWidth}
-                  strokeDasharray={FECAL_GMV30_STYLE.strokeDasharray}
-                  name={FECAL_GMV30_SERIES_NAME}
-                  dot={false}
-                  connectNulls={true}
-                />
-                <ReferenceLine
-                  y={ECOLI_GMV_LIMIT_VALUE}
-                  yAxisId="left"
-                  stroke={ECOLI_GMV_LIMIT_STYLE.stroke}
-                  strokeDasharray={ECOLI_GMV_LIMIT_STYLE.strokeDasharray}
-                  strokeWidth={ECOLI_GMV_LIMIT_STYLE.strokeWidth}
-                  name={ECOLI_GMV_LIMIT_NAME}
-                />
-                <ReferenceLine
-                  y={FECAL_GMV_LIMIT_VALUE}
-                  yAxisId="left"
-                  stroke={FECAL_GMV_LIMIT_STYLE.stroke}
-                  strokeDasharray={FECAL_GMV_LIMIT_STYLE.strokeDasharray}
-                  strokeWidth={FECAL_GMV_LIMIT_STYLE.strokeWidth}
-                  name={FECAL_GMV_LIMIT_NAME}
-                />
+                {chartData.hasFecalData && (
+                  <Line
+                    yAxisId="left"
+                    type="linear"
+                    data={chartData.fecalGmvSeries}
+                    dataKey="FecalGMV"
+                    stroke={FECAL_GMV30_STYLE.stroke}
+                    strokeWidth={FECAL_GMV30_STYLE.strokeWidth}
+                    strokeDasharray={FECAL_GMV30_STYLE.strokeDasharray}
+                    name={FECAL_GMV30_SERIES_NAME}
+                    dot={false}
+                    connectNulls={true}
+                  />
+                )}
+                {ECOLI_GMV_LIMIT_VALUE <= chartData.leftAxisMax && (
+                  <ReferenceLine
+                    y={ECOLI_GMV_LIMIT_VALUE}
+                    yAxisId="left"
+                    stroke={ECOLI_GMV_LIMIT_STYLE.stroke}
+                    strokeDasharray={ECOLI_GMV_LIMIT_STYLE.strokeDasharray}
+                    strokeWidth={ECOLI_GMV_LIMIT_STYLE.strokeWidth}
+                    name={ECOLI_GMV_LIMIT_NAME}
+                  />
+                )}
+                {chartData.hasFecalData && FECAL_GMV_LIMIT_VALUE <= chartData.leftAxisMax && (
+                  <ReferenceLine
+                    y={FECAL_GMV_LIMIT_VALUE}
+                    yAxisId="left"
+                    stroke={FECAL_GMV_LIMIT_STYLE.stroke}
+                    strokeDasharray={FECAL_GMV_LIMIT_STYLE.strokeDasharray}
+                    strokeWidth={FECAL_GMV_LIMIT_STYLE.strokeWidth}
+                    name={FECAL_GMV_LIMIT_NAME}
+                  />
+                )}
                 <Scatter
                   yAxisId="left"
-                  data={chartData.ecoliStats.filter((row) => row.Value != null)}
-                  dataKey="Value"
-                  fill="#2ca02c"
-                  name="E. coli observations"
+                  data={chartData.ecoliObservationSeries}
+                  dataKey="EcoliValue"
+                  fill={KPH_D_ECOLI_OBSERVATION_COLOR}
+                  shape={KphdObservationShape}
+                  name={ECOLI_OBSERVATIONS_SERIES_NAME}
                 />
-                <Scatter
-                  yAxisId="left"
-                  data={chartData.fecalStats.filter((row) => row.Value != null)}
-                  dataKey="Value"
-                  fill="#d62728"
-                  name={FECAL_OBSERVATIONS_SERIES_NAME}
-                />
+                {chartData.ecoliThresholdExceedances.length > 0 && (
+                  <Scatter
+                    yAxisId="left"
+                    data={chartData.ecoliThresholdExceedances}
+                    dataKey="Value"
+                    fill="transparent"
+                    stroke={ECOLI_P90_LIMIT_COLOR}
+                    strokeWidth={2}
+                    isAnimationActive={false}
+                    shape={ECOLI_THRESHOLD_SHAPE}
+                    name={ECOLI_THRESHOLD_SERIES_NAME}
+                  />
+                )}
+                {chartData.hasFecalData && (
+                  <Scatter
+                    yAxisId="left"
+                    data={chartData.fecalObservationSeries}
+                    dataKey="FecalValue"
+                    fill="#d62728"
+                    name={FECAL_OBSERVATIONS_SERIES_NAME}
+                  />
+                )}
                 {/* E. coli above threshold hidden for QA */}
                 {false && <Scatter
                   yAxisId="left"
@@ -517,17 +685,19 @@ const App = () => {
                   }}
                   name="E. coli below threshold"
                 />}
-                <Scatter
-                  yAxisId="left"
-                  data={chartData.fecalStats.filter((row) => row.Exceeds_RegThreshold)}
-                  dataKey="Value"
-                  fill="transparent"
-                  stroke="#d62728"
-                  strokeWidth={2}
-                  isAnimationActive={false}
-                  shape={FECAL_THRESHOLD_SHAPE}
-                  name={FECAL_THRESHOLD_SERIES_NAME}
-                />
+                {chartData.hasFecalData && chartData.fecalThresholdExceedances.length > 0 && (
+                  <Scatter
+                    yAxisId="left"
+                    data={chartData.fecalThresholdExceedances}
+                    dataKey="Value"
+                    fill="transparent"
+                    stroke={FECAL_P90_LIMIT_COLOR}
+                    strokeWidth={2}
+                    isAnimationActive={false}
+                    shape={FECAL_THRESHOLD_SHAPE}
+                    name={FECAL_THRESHOLD_SERIES_NAME}
+                  />
+                )}
                 {/* Fecal Coliform below threshold hidden for QA */}
                 {false && <Scatter
                   yAxisId="left"
@@ -546,6 +716,87 @@ const App = () => {
           </div>
           {!chartData.hasFecalData && (
             <div className="warning-banner">No WA DOH fecal coliform station exists for this catchment; only E. coli will display for the selected station.</div>
+          )}
+          {chartData.showKphdFecalNote && (
+            <div className="info-banner">Light green observations in the &quot;E. coli observations&quot; series before 2020 are actually Fecal Coliform observations.</div>
+          )}
+          <section className="data-table-section">
+            <h3>Table of KPHD Observations from gage {selectedStationDetails?.EIMLocationID}</h3>
+            <p className="table-threshold-note">
+              EPA E. coli thresholds in fresh water: GMV threshold: {ECOLI_GMV_LIMIT_VALUE} cfu/100mL; 90%ile threshold: {ECOLI_P90_LIMIT_VALUE} cfu/100mL
+            </p>
+            <div className="table-scroll">
+              <table className="observations-table">
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Constituent</th>
+                    <th>Avg_Obs</th>
+                    <th>Count</th>
+                    <th>units</th>
+                    <th>30GMV</th>
+                    <th>90%ile_raw</th>
+                    <th>90%ile_ln</th>
+                    <th>90%ile_chart</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {chartData.kphdTableRows.map((row, index) => (
+                    <tr key={`${row.Date.toISOString()}-${row.Value}-${index}`}>
+                      <td>{formatDate(row.Date)}</td>
+                      <td>{row.Constituent}</td>
+                      <td>{formatNumber(row.Value, 1)}</td>
+                      <td>{row.Count}</td>
+                      <td>{row.Units}</td>
+                      <td className={row.GMV30 > ECOLI_GMV_LIMIT_VALUE ? 'threshold-exceedance' : undefined}>{formatNumber(row.GMV30)}</td>
+                      <td className={row.P90_30 > ECOLI_P90_LIMIT_VALUE ? 'threshold-exceedance' : undefined}>{formatNumber(row.P90_30)}</td>
+                      <td className={row.P90_LN_30 > ECOLI_P90_LIMIT_VALUE ? 'threshold-exceedance' : undefined}>{formatNumber(row.P90_LN_30)}</td>
+                      <td>{row.Exceeds_RegThreshold ? formatNumber(row.Value, 1) : ''}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+          {chartData.hasFecalData && (
+            <section className="data-table-section">
+              <h3>Table of WA DOH observations for gage ID: {selectedStationDetails?.WADOHStation}</h3>
+              <p className="table-threshold-note">
+                Fecal Coliform thresholds: GMV threshold: {FECAL_GMV_LIMIT_VALUE} cfu/100mL; 90%ile threshold: {FECAL_P90_LIMIT_VALUE} colonies/100mL
+              </p>
+              <div className="table-scroll">
+                <table className="observations-table">
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>Constituent</th>
+                      <th>Avg_Obs</th>
+                      <th>Count</th>
+                      <th>units</th>
+                      <th>30GMV</th>
+                      <th>90%ile_raw</th>
+                      <th>90%ile_ln</th>
+                      <th>90%ile_chart</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {chartData.waDohTableRows.map((row, index) => (
+                      <tr key={`${row.Date.toISOString()}-${row.Value}-${index}`}>
+                        <td>{formatDate(row.Date)}</td>
+                        <td>{row.Constituent}</td>
+                        <td>{formatNumber(row.Value, 1)}</td>
+                        <td>{row.Count}</td>
+                        <td>{row.Units}</td>
+                        <td className={row.GMV30 > FECAL_GMV_LIMIT_VALUE ? 'threshold-exceedance' : undefined}>{formatNumber(row.GMV30)}</td>
+                        <td className={row.P90_30 > FECAL_P90_LIMIT_VALUE ? 'threshold-exceedance' : undefined}>{formatNumber(row.P90_30)}</td>
+                        <td className={row.P90_LN_30 > FECAL_P90_LIMIT_VALUE ? 'threshold-exceedance' : undefined}>{formatNumber(row.P90_LN_30)}</td>
+                        <td>{row.Exceeds_RegThreshold ? formatNumber(row.Value, 1) : ''}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
           )}
         </section>
       ) : (
