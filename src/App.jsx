@@ -106,7 +106,16 @@ const collapseDaily = (rows) => {
 }
 
 const addRollingStats = (rows, threshold, window = 30, exceedanceMethod = 'lognormal') => {
-  const out = rows.map((row) => ({ ...row, GMV30: NaN, P90_30: NaN, P90_LN_30: NaN, Exceeds_RegThreshold: false, Crosses_Above_Threshold: false, Crosses_Below_Threshold: false }))
+  const out = rows.map((row) => ({
+    ...row,
+    GMV30: NaN,
+    GMV30IncludesFecal: false,
+    P90_30: NaN,
+    P90_LN_30: NaN,
+    Exceeds_RegThreshold: false,
+    Crosses_Above_Threshold: false,
+    Crosses_Below_Threshold: false,
+  }))
   for (let index = 0; index < out.length; index += 1) {
     const windowRows = out.slice(Math.max(0, index - window + 1), index + 1)
     if (windowRows.length === window) {
@@ -115,6 +124,7 @@ const addRollingStats = (rows, threshold, window = 30, exceedanceMethod = 'logno
       const p90 = quantile(values, 0.9)
       const p90Ln = lognormalPercentile(values, 1.2815515655446004)
       out[index].GMV30 = Number.isNaN(gmv) ? null : gmv
+      out[index].GMV30IncludesFecal = windowRows.some((row) => row.Constituent === 'Fecal Coliform')
       out[index].P90_30 = Number.isNaN(p90) ? null : p90
       out[index].P90_LN_30 = Number.isNaN(p90Ln) ? null : p90Ln
       const exceedanceValue = exceedanceMethod === 'raw' ? p90 : p90Ln
@@ -148,6 +158,31 @@ const KphdObservationShape = ({ cx, cy, payload }) => (
 )
 
 const toTimeKey = (date) => date.toISOString().slice(0, 10)
+
+const splitGmvSegments = (rows, valueKey, mixedKey) => {
+  const segments = []
+  let currentSegment = null
+  let previousPoint = null
+
+  rows
+    .filter((row) => row[valueKey] != null)
+    .sort((a, b) => a.Date - b.Date)
+    .forEach((row) => {
+      const includesFecal = Boolean(row[mixedKey])
+      if (!currentSegment || currentSegment.includesFecal !== includesFecal) {
+        currentSegment = {
+          includesFecal,
+          points: previousPoint ? [previousPoint, row] : [row],
+        }
+        segments.push(currentSegment)
+      } else {
+        currentSegment.points.push(row)
+      }
+      previousPoint = row
+    })
+
+  return segments
+}
 
 const createChartSeries = (precip, ecoliStats, fecalStats, start, end) => {
   const dateMap = new Map()
@@ -184,6 +219,7 @@ const createChartSeries = (precip, ecoliStats, fecalStats, start, end) => {
     const existing = ensureDateObject(row)
     existing.EcoliValue = row.Value
     existing.EcoliGMV = row.GMV30
+    existing.EcoliGMVIncludesFecal = row.GMV30IncludesFecal
   })
   fecalStats.forEach((row) => {
     if (row.Date < start || row.Date > end) return
@@ -390,14 +426,17 @@ const App = () => {
       .map((row) => row.Value)
       .filter((value) => Number.isFinite(value) && value > 0)
     const maxObservedValue = observedValues.length > 0 ? Math.max(...observedValues) : 1
+    const ecoliGmvSeries = sampleEcoliStats
+      .filter((row) => row.GMV30 != null)
+      .map((row) => ({ ...row, EcoliGMV: row.GMV30, EcoliGMVIncludesFecal: row.GMV30IncludesFecal }))
+    const ecoliGmvSegments = splitGmvSegments(ecoliGmvSeries, 'EcoliGMV', 'EcoliGMVIncludesFecal')
 
     setChartData({
       chartSeries,
       ecoliStats: sampleEcoliStats,
       fecalStats: sampleFecalStats,
-      ecoliGmvSeries: sampleEcoliStats
-        .filter((row) => row.GMV30 != null)
-        .map((row) => ({ ...row, EcoliGMV: row.GMV30 })),
+      ecoliGmvSeries,
+      ecoliGmvSegments,
       fecalGmvSeries: sampleFecalStats
         .filter((row) => row.GMV30 != null)
         .map((row) => ({ ...row, FecalGMV: row.GMV30 })),
@@ -414,6 +453,7 @@ const App = () => {
       leftAxisMax: Math.max(1, maxObservedValue * 1.05),
       hasFecalData: Boolean(stationFecal.length),
       showKphdFecalNote: startYear < 2020,
+      showKphdFecalGmvNote: ecoliGmvSegments.some((segment) => segment.includesFecal),
     })
   }
 
@@ -584,17 +624,21 @@ const App = () => {
                 />
 
                 <Bar dataKey="Precip_in" barSize={2} barCategoryGap="2%" fill="#1f77b4" opacity={0.25} yAxisId="right" />
-                <Line
-                  yAxisId="left"
-                  type="linear"
-                  data={chartData.ecoliGmvSeries}
-                  dataKey="EcoliGMV"
-                  stroke="#2ca02c"
-                  strokeWidth={3}
-                  name={ECOLI_GMV30_SERIES_NAME}
-                  dot={false}
-                  connectNulls={true}
-                />
+                {chartData.ecoliGmvSegments.map((segment, index) => (
+                  <Line
+                    key={`ecoli-gmv-${index}`}
+                    yAxisId="left"
+                    type="linear"
+                    data={segment.points}
+                    dataKey="EcoliGMV"
+                    stroke={segment.includesFecal ? KPH_D_FECAL_OBSERVATION_COLOR : KPH_D_ECOLI_OBSERVATION_COLOR}
+                    strokeWidth={3}
+                    name={ECOLI_GMV30_SERIES_NAME}
+                    dot={false}
+                    connectNulls={true}
+                    legendType="none"
+                  />
+                ))}
                 {chartData.hasFecalData && (
                   <Line
                     yAxisId="left"
@@ -718,7 +762,10 @@ const App = () => {
             <div className="warning-banner">No WA DOH fecal coliform station exists for this catchment; only E. coli will display for the selected station.</div>
           )}
           {chartData.showKphdFecalNote && (
-            <div className="info-banner">Light green observations in the &quot;E. coli observations&quot; series before 2020 are actually Fecal Coliform observations.</div>
+            <div className="info-banner">Light green observations in the &quot;E. coli observations&quot; series are actually KPHD Fecal Coliform freshwater observations from before 2020.</div>
+          )}
+          {chartData.showKphdFecalGmvNote && (
+            <div className="info-banner">Light green portions of the E. coli GMV30 line use rolling 30-observation-day windows that include KPHD Fecal Coliform freshwater observations from before 2020.</div>
           )}
           <section className="data-table-section">
             <h3>Table of KPHD Observations from gage {selectedStationDetails?.EIMLocationID}</h3>
